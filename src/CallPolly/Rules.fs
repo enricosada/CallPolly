@@ -14,12 +14,13 @@ module private Option =
 
 type BreakerConfig = { window: TimeSpan; minThroughput: int; errorRateThreshold: float; retryAfter: TimeSpan; dryRun: bool }
 type BulkheadConfig = { dop: int; queue: int; dryRun: bool }
+type TaggedBulkheadConfig = { dop: int; queue: int; tag: string; dryRun: bool }
 type CutoffConfig = { timeout: TimeSpan; sla: TimeSpan option; dryRun: bool }
 type PolicyConfig =
     {   // Prettify DumpState diagnostic output - this structure is not roundtripped but isolated circuits stand out better when rare
         [<Newtonsoft.Json.JsonProperty(DefaultValueHandling=Newtonsoft.Json.DefaultValueHandling.Ignore)>]
         isolate: bool
-        cutoff: CutoffConfig option; limit: BulkheadConfig option; breaker: BreakerConfig option }
+        cutoff: CutoffConfig option; limit: BulkheadConfig option; taggedLimits: TaggedBulkheadConfig list; breaker: BreakerConfig option }
 
 type GovernorState = { circuitState : string option; bulkheadAvailable : int option; queueAvailable : int option }
 
@@ -128,7 +129,7 @@ type Governor
             Some () // Compiler gets too clever if we never return Some
 
     /// Execute and/or log failures regarding invocation of a function with the relevant policy applied
-    member __.Execute(inner : Async<'a>, ?log) : Async<'a> =
+    member __.Execute(inner : Async<'a>, ?log : Serilog.ILogger, ?tags: (string * string) list) : Async<'a> =
         let callLog = defaultArg log stateLog
         match asyncPolicy with
         | None ->
@@ -174,8 +175,12 @@ type Governor
             let execute = async {
                 let! ct = Async.CancellationToken // Grab async cancellation token of this `Execute` call, so cancellation gets propagated into the Polly [wrap]
                 callLog.Debug("Policy Execute Inner {service:l}-{call:l}", serviceName, callName)
-                let ctx = Seq.singleton ("log", box callLog) |> dict
-                try return! polly.ExecuteAsync(startInnerTask, ctx, ct) |> Async.AwaitTaskCorrect
+                let contextData = dict <| seq {
+                    yield ("log", box callLog)
+                    match tags with
+                    | None -> ()
+                    | Some (t : (string * string) list) -> yield "tags", box t }
+                try return! polly.ExecuteAsync(startInnerTask, contextData, ct) |> Async.AwaitTaskCorrect
                 // TODO find/add a cleaner way to use the Polly API to log when the event fires due to the the circuit being Isolated/Broken
                 with LogWhenRejectedFilter callLog jitProcessingInterval -> return! invalidOp "not possible; Filter always returns None" }
             match config.cutoff with
@@ -230,8 +235,8 @@ type CallPolicy<'TConfig when 'TConfig: equality> (makeGoverner : CallConfig<'TC
     member __.Config = cfg.config
 
     /// Execute the call, apply the policy rules
-    member __.Execute(inner : Async<'t>, ?log) =
-        governor.Execute(inner,?log=log)
+    member __.Execute(inner : Async<'t>, ?log, ?tags) =
+        governor.Execute(inner, ?log=log, ?tags=tags)
 
     /// Facilitates dumping for diagnostics
     member __.InternalState =

@@ -45,6 +45,9 @@ module Core =
             "limit": [
                 { "rule": "Limit",  "maxParallel": 2, "maxQueue": 3, "dryRun": true }
             ],
+            "limitBy": [
+                { "rule": "LimitBy","maxParallel": 3, "maxQueue": 2, "tag": "clientIp", "dryRun": true }
+            ],
             "break": [
                 { "rule": "Break",  "windowS": 5, "minRequests": 100, "failPct": 20, "breakS": 1 }
             ],
@@ -57,6 +60,7 @@ module Core =
             "heavy": [
                 { "rule": "Include","policy": "defaultLog" },
                 { "rule": "Include","policy": "limit" },
+                { "rule": "Include","policy": "limitBy" },
                 { "rule": "Include","policy": "break" },
                 { "rule": "Include","policy": "cutoff" },
                 { "rule": "Sla",    "slaMs": 5000, "timeoutMs": 10000 },
@@ -72,15 +76,15 @@ module Core =
 
     let limitParsed = mkPolicy <| Config.Policy.Input.Value.Limit { maxParallel=2; maxQueue=3; dryRun=Some true }
     let limitConfig : Rules.BulkheadConfig = { dop=2; queue=3; dryRun=true }
-    let limitPolicy = Config.Policy.Rule.Limit limitConfig
+
+    let limitByParsed = mkPolicy <| Config.Policy.Input.Value.LimitBy { maxParallel=3; maxQueue=2; tag="clientIp"; dryRun=Some true }
+    let limitByConfig : Rules.TaggedBulkheadConfig = { dop=3; queue=2; tag="clientIp"; dryRun=true }
 
     let breakParsed = mkPolicy <| Config.Policy.Input.Value.Break { windowS = 5; minRequests = 100; failPct=20.; breakS = 1.; dryRun = None }
     let breakConfig : Rules.BreakerConfig = { window = s 5; minThroughput = 100; errorRateThreshold = 0.2; retryAfter = s 1; dryRun = false }
-    let breakPolicy = Config.Policy.Rule.Break breakConfig
 
     let cutoffParsed = mkPolicy <| Config.Policy.Input.Value.Cutoff { timeoutMs = 500; slaMs = None; dryRun = Some true }
     let cutoffConfig : Rules.CutoffConfig = { timeout = ms 500; sla = None; dryRun = true }
-    let cutoffPolicy = Config.Policy.Rule.Cutoff cutoffConfig
 
     let isolateParsed = mkPolicy <| Config.Policy.Input.Value.Isolate
 
@@ -93,12 +97,12 @@ module Core =
         {   timeout = Some (s 5); sla = Some (s 1)
             ``base`` = Some baseUri; rel = None
             reqLog = Config.Http.LogLevel.OnlyWhenDebugEnabled; resLog = Config.Http.LogLevel.OnlyWhenDebugEnabled }
-    let noPolicy = { isolate = false; cutoff = None; limit = None; breaker = None; }
+    let noPolicy = { isolate = false; cutoff = None; limit = None; taggedLimits = []; breaker = None; }
     let heavyConfig : Config.Http.Configuration =
         {   timeout = Some (s 10); sla = Some (s 5)
             ``base`` = None; rel = None
             reqLog = Config.Http.LogLevel.OnlyWhenDebugEnabled; resLog = Config.Http.LogLevel.OnlyWhenDebugEnabled }
-    let heavyRules = { isolate = true; cutoff = Some cutoffConfig; limit = Some limitConfig; breaker = Some breakConfig }
+    let heavyRules = { isolate = true; cutoff = Some cutoffConfig; limit = Some limitConfig; taggedLimits = [limitByConfig]; breaker = Some breakConfig }
     let mkParsedSla sla timeout = Parser.ParsedRule.Http (Config.Http.Input.Value.Sla {slaMs = sla; timeoutMs = timeout })
 
     /// Base tests exercising core functionality
@@ -117,7 +121,7 @@ module Core =
                     && noPolicy = edd.Policy @>
             let poRaw = findRaw "placeOrder"
             let po = trap <@ tryFindActionRules "placeOrder" |> Option.get @>
-            test <@ [logParsed; limitParsed; breakParsed; cutoffParsed; mkParsedSla 5000 10000; isolateParsed] = poRaw
+            test <@ [logParsed; limitParsed; limitByParsed; breakParsed; cutoffParsed; mkParsedSla 5000 10000; isolateParsed] = poRaw
                     && heavyConfig = po.Config
                     && heavyRules = po.Policy @>
             test <@ None = tryFindActionRules "missing" @>
@@ -130,7 +134,7 @@ module Core =
             let default_ = findRaw "(default)"
             test <@ baseParsed :: default_ = findRaw "EstimatedDeliveryDates" @>
             test <@ [isolateParsed] = findRaw "EstimatedDeliveryDate" @>
-            test <@ defaultLog @ [limitParsed; breakParsed; cutoffParsed; mkParsedSla 5000 10000; isolateParsed] = findRaw "placeOrder" @>
+            test <@ defaultLog @ [limitParsed; limitByParsed; breakParsed; cutoffParsed; mkParsedSla 5000 10000; isolateParsed] = findRaw "placeOrder" @>
             let heavyPolicy = pol.Find("default","placeOrder")
             test <@ heavyPolicy.Policy.isolate
                     && Some breakConfig = heavyPolicy.Policy.breaker @>
